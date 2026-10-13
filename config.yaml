@@ -1,0 +1,60 @@
+# Lacrosse Tracker configuration
+# Changing a list here changes the app — no code edits needed.
+
+# Skills shared by player reports AND coach ratings. Names must match exactly.
+skills:
+  - passing
+  - catching
+  - shooting
+  - dodging
+  - footwork
+  - ground_balls
+  - defense
+  - stick_skills
+
+# Rated by coaches only. Never shown in the player CSV and never used in cheat detection.
+coach_traits:
+  - attitude
+  - coachability
+  - competitiveness
+
+# Core skills per position. Off-profile skills can still be reported — they're
+# just compared against players who have that skill as core, and never penalised.
+positions:
+  attack:
+    core: [passing, catching, shooting, dodging, stick_skills]
+  midfield:
+    core: all
+  defense:
+    core: [passing, catching, footwork, ground_balls, defense]
+  goalie:
+    core: [passing, catching, stick_skills]
+
+scale:
+  min: 1.0
+  max: 10.0
+
+# Hard limit enforced at import (a row above this rejects the whole file).
+max_hours_per_skill_week: 25
+
+detection:
+  window_weeks: 6            # rolling window every rule looks at
+  min_report_weeks: 3        # submitted weeks needed before judging a player
+  min_coach_weeks: 3         # weeks with coach ratings needed for a skill
+  min_hours_per_week: 4      # hours-vs-gain only looks at skills above this
+  late_grace_days: 14        # report received this long after its week ended = late
+  soft_total_hours_week: 30  # weekly total above this looks implausible
+  thresholds:
+    yellow: 0.30
+    red: 0.65
+  # How much each rule can contribute to the 0–1 score (score = sum of weight × severity, capped at 1)
+  weights:
+    hours_vs_gain: 1.0
+    effort_gap: 0.6
+    plausibility: 0.7
+    copy: 0.9
+    patterns: 0.5
+    backfill: 0.4
+    resubmission: 0.4
+
+data_dir: data

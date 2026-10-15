@@ -1,12 +1,34 @@
-import numpy as np
+"""
+Team charts page.
+
+Box plots with every player as a clickable dot, for any metric, plus a panel for the clicked
+player and three extra team views: a players x skills heatmap, hours vs. improvement, and the
+self vs. coach effort gap.
+
+Week mode puts one box per skill (or position / trait); overview mode puts one box per week.
+
+Version history
+---------------
+1.0.0  2026-10-13  Initial release.
+1.1.0  2026-10-15  Readability pass: descriptive names, file header.
+"""
 import pandas as pd
 import streamlit as st
 
-from tracker import charts
-from tracker import queries as q
-from tracker.config import CFG, label
+from tracker import charts, queries
+from tracker.config import CFG, display_label
 from tracker.detection import run_detection
 from tracker.ui import get_conn, select_player, short_week, status_badge, time_controls
+
+# Metric name -> (data source, column). Sources: coach ratings, player reports, weekly totals, coach traits.
+METRICS = {
+    "Coach competency": ("coach", "competency"),
+    "Coach effort": ("coach", "effort"),
+    "Self-reported hours": ("reports", "hours"),
+    "Self-rated effort": ("reports", "effort"),
+    "Total hours": ("total", "hours"),
+    "Coach-only traits": ("traits", "score"),
+}
 
 conn = get_conn()
 view = time_controls(conn)
@@ -15,228 +37,243 @@ if view is None:
     st.info("No data yet.")
     st.stop()
 
-players = q.players_df(conn)
-res = run_detection(conn, view.as_of)
-status = dict(zip(res.status.player_id, res.status.status))
-rep = q.reports_df(conn)
-coach = q.coach_skill_df(conn)
-traits = q.coach_traits_df(conn)
+players = queries.players_df(conn)
+detection = run_detection(conn, view.as_of)
+status_of = dict(zip(detection.status.player_id, detection.status.status))
+reports = queries.reports_df(conn)
+coach_ratings = queries.coach_skill_df(conn)
+traits = queries.coach_traits_df(conn)
 
-METRICS = {
-    "Coach competency": ("coach", "competency"),
-    "Coach effort": ("coach", "effort"),
-    "Self-reported hours": ("rep", "hours"),
-    "Self-rated effort": ("rep", "effort"),
-    "Total hours": ("total", "hours"),
-    "Coach-only traits": ("traits", "score"),
-}
+metric_column, positions_column, options_column = st.columns([2, 2, 2])
+metric = metric_column.selectbox("Metric", list(METRICS), key="team_metric")
+source, value_column = METRICS[metric]
+is_self_reported_hours = source == "reports" and value_column == "hours"
+chosen_positions = positions_column.multiselect("Positions", list(CFG.positions), default=list(CFG.positions),
+                                                key="team_pos", format_func=str.capitalize)
+include_zero_hours = False
+if is_self_reported_hours:
+    include_zero_hours = options_column.toggle(
+        "Include 0-hour entries", value=False, key="team_zero",
+        help="0 hours = didn't train that skill. Hidden by default so untrained players don't drag the box down.")
 
-c1, c2, c3 = st.columns([2, 2, 2])
-metric = c1.selectbox("Metric", list(METRICS), key="team_metric")
-src, col = METRICS[metric]
-positions = c2.multiselect("Positions", list(CFG.positions), default=list(CFG.positions), key="team_pos",
-                           format_func=str.capitalize)
-include_zero = False
-if src in ("rep",) and col == "hours":
-    include_zero = c3.toggle("Include 0-hour entries", value=False, key="team_zero",
-                             help="0 hours = didn't train that skill. Hidden by default so untrained players "
-                                  "don't drag the box down.")
-
-pl = players[players.position.isin(positions)]
-pos_of = dict(zip(players.player_id, players.position))
+shown_players = players[players.position.isin(chosen_positions)]
+position_of = dict(zip(players.player_id, players.position))
 name_of = dict(zip(players.player_id, players.name))
 
 # ---- choose what each box represents
+weeks_shown = view.weeks
 if view.mode == "week":
-    week_list = view.weeks
-    if src == "total":
-        dim, groups = "position", [p for p in CFG.positions if p in positions]
-        group_labels = [p.capitalize() for p in groups]
-    elif src == "traits":
-        dim, groups = "trait", list(CFG.coach_traits)
-        group_labels = [label(t) for t in groups]
+    if source == "total":
+        group_by, groups = "position", [position for position in CFG.positions if position in chosen_positions]
+        group_labels = [position.capitalize() for position in groups]
+    elif source == "traits":
+        group_by, groups = "trait", list(CFG.coach_traits)
+        group_labels = [display_label(trait) for trait in groups]
     else:
-        chosen = c3.multiselect("Skills", CFG.skills, default=CFG.skills, key="team_skills", format_func=label) \
-            if not (src == "rep" and col == "hours") else CFG.skills
-        dim, groups = "skill", [s for s in CFG.skills if s in chosen]
-        group_labels = [label(s) for s in groups]
+        if is_self_reported_hours:
+            chosen_skills = CFG.skills
+        else:
+            chosen_skills = options_column.multiselect("Skills", CFG.skills, default=CFG.skills, key="team_skills",
+                                                       format_func=display_label)
+        group_by, groups = "skill", [skill for skill in CFG.skills if skill in chosen_skills]
+        group_labels = [display_label(skill) for skill in groups]
 else:
-    week_list = view.weeks
-    dim, groups, group_labels = "week_start", week_list, [short_week(w) for w in week_list]
-    if src == "traits":
-        focus = st.selectbox("Trait", CFG.coach_traits, key="team_trait", format_func=label)
-    elif src != "total":
-        focus = st.selectbox("Skill", CFG.skills, key="team_skill_ov", format_func=label)
+    group_by, groups, group_labels = "week_start", weeks_shown, [short_week(week) for week in weeks_shown]
+    if source == "traits":
+        focus = st.selectbox("Trait", CFG.coach_traits, key="team_trait", format_func=display_label)
+    elif source != "total":
+        focus = st.selectbox("Skill", CFG.skills, key="team_skill_ov", format_func=display_label)
 
 # ---- build one row per dot
-if src == "coach":
-    d = coach[coach.week_start.isin(week_list)].dropna(subset=[col]).rename(columns={col: "value"})
+if source == "coach":
+    dots = coach_ratings[coach_ratings.week_start.isin(weeks_shown)].dropna(subset=[value_column])
+    dots = dots.rename(columns={value_column: "value"})
     if view.mode == "overview":
-        d = d[d.skill == focus]
-    d["hover"] = d.player_id.map(pos_of).str.capitalize() + " · " + d.week_start.map(short_week) + \
-        " · " + d.n_coaches.astype(str) + " coach(es)"
-elif src == "rep":
-    d = rep[rep.week_start.isin(week_list)].copy()
-    if col == "hours" and not include_zero:
-        hidden = int((d.hours == 0).sum()) if view.mode == "week" else int(((d.hours == 0) & (d.skill == focus)).sum())
-        d = d[d.hours > 0]
-    if col == "effort":
-        d = d.dropna(subset=["effort"])
+        dots = dots[dots.skill == focus]
+    dots["hover"] = (dots.player_id.map(position_of).str.capitalize() + " · " + dots.week_start.map(short_week)
+                     + " · " + dots.n_coaches.astype(str) + " coach(es)")
+elif source == "reports":
+    dots = reports[reports.week_start.isin(weeks_shown)].copy()
+    if is_self_reported_hours and not include_zero_hours:
+        if view.mode == "week":
+            hidden_zero_count = int((dots.hours == 0).sum())
+        else:
+            hidden_zero_count = int(((dots.hours == 0) & (dots.skill == focus)).sum())
+        dots = dots[dots.hours > 0]
+    if value_column == "effort":
+        dots = dots.dropna(subset=["effort"])
     if view.mode == "overview":
-        d = d[d.skill == focus]
-    d = d.rename(columns={col: "value"})
-    d["hover"] = d.player_id.map(pos_of).str.capitalize() + " · " + d.week_start.map(short_week) + \
-        " · " + d.file + " row " + d.source_row.fillna(0).astype(int).astype(str)
-elif src == "total":
-    d = q.weekly_totals(rep[rep.week_start.isin(week_list)]).rename(columns={"total_hours": "value"})
-    d["position"] = d.player_id.map(pos_of)
-    d["value"] = d["value"].round(1)
-    d["hover"] = d.position.str.capitalize() + " · " + d.week_start.map(short_week)
+        dots = dots[dots.skill == focus]
+    dots = dots.rename(columns={value_column: "value"})
+    dots["hover"] = (dots.player_id.map(position_of).str.capitalize() + " · " + dots.week_start.map(short_week)
+                     + " · " + dots.file + " row " + dots.source_row.fillna(0).astype(int).astype(str))
+elif source == "total":
+    dots = queries.weekly_totals(reports[reports.week_start.isin(weeks_shown)]).rename(columns={"total_hours": "value"})
+    dots["position"] = dots.player_id.map(position_of)
+    dots["value"] = dots["value"].round(1)
+    dots["hover"] = dots.position.str.capitalize() + " · " + dots.week_start.map(short_week)
 else:
-    d = traits[traits.week_start.isin(week_list)].rename(columns={"score": "value"})
+    dots = traits[traits.week_start.isin(weeks_shown)].rename(columns={"score": "value"})
     if view.mode == "overview":
-        d = d[d.trait == focus]
-    d["hover"] = d.player_id.map(pos_of).str.capitalize() + " · " + d.week_start.map(short_week) + " · coach only"
+        dots = dots[dots.trait == focus]
+    dots["hover"] = (dots.player_id.map(position_of).str.capitalize() + " · " + dots.week_start.map(short_week)
+                     + " · coach only")
 
-d = d[d.player_id.isin(pl.player_id)].copy()
-d["group"] = d[dim]
-d["name"] = d.player_id.map(name_of)
-d["status"] = d.player_id.map(status).fillna("gray")
+dots = dots[dots.player_id.isin(shown_players.player_id)].copy()
+dots["group"] = dots[group_by]
+dots["name"] = dots.player_id.map(name_of)
+dots["status"] = dots.player_id.map(status_of).fillna("gray")
 
-y_title = {"hours": "Hours per week"}.get(col, f"{metric} (1–10)")
-y_range = None if col == "hours" else [0.5, 10.5]
-fig = charts.box_with_dots(d, groups, group_labels, y_title, y_range, st.session_state.get("_player"))
-event = st.plotly_chart(fig, width="stretch", on_select="rerun", selection_mode="points", key="team_box")
+y_title = {"hours": "Hours per week"}.get(value_column, f"{metric} (1–10)")
+y_range = None if value_column == "hours" else [0.5, 10.5]
+box_figure = charts.box_with_dots(dots, groups, group_labels, y_title, y_range, st.session_state.get("_player"))
+box_event = st.plotly_chart(box_figure, width="stretch", on_select="rerun", selection_mode="points", key="team_box")
 
-notes = []
-if src == "rep" and col == "hours" and not include_zero:
-    notes.append(f"{hidden} zero-hour entries hidden")
-miss = q.missing_reports(conn, week_list)
-miss = miss[miss.player_id.isin(pl.player_id)]
-if src in ("rep", "total") and len(miss):
-    notes.append(f"missing reports excluded ({len(miss)})")
-if src == "total" and view.mode == "week":
-    notes.append("total = all skills summed; split by position so defenders are compared with defenders")
-if notes:
-    st.caption(" · ".join(notes).capitalize() + ". Click a dot to open that player.")
+chart_notes = []
+if is_self_reported_hours and not include_zero_hours:
+    chart_notes.append(f"{hidden_zero_count} zero-hour entries hidden")
+missing = queries.missing_reports(conn, weeks_shown)
+missing = missing[missing.player_id.isin(shown_players.player_id)]
+if source in ("reports", "total") and len(missing):
+    chart_notes.append(f"missing reports excluded ({len(missing)})")
+if source == "total" and view.mode == "week":
+    chart_notes.append("total = all skills summed; split by position so defenders are compared with defenders")
+if chart_notes:
+    st.caption(" · ".join(chart_notes).capitalize() + ". Click a dot to open that player.")
 
-if event and event.selection and event.selection.get("points"):
-    pt = next((p for p in event.selection["points"] if p.get("customdata")), None)
-    if pt:
-        select_player(int(float(pt["customdata"][0])))
-        gi = int(round(float(pt.get("x", 0))))
-        if dim == "skill" and 0 <= gi < len(groups):
-            st.session_state["_skill"] = groups[gi]
+if box_event and box_event.selection and box_event.selection.get("points"):
+    clicked_point = next((point for point in box_event.selection["points"] if point.get("customdata")), None)
+    if clicked_point:
+        select_player(int(float(clicked_point["customdata"][0])))
+        clicked_group = int(round(float(clicked_point.get("x", 0))))
+        if group_by == "skill" and 0 <= clicked_group < len(groups):
+            st.session_state["_skill"] = groups[clicked_group]
 
 # ---- player panel
-pid = st.session_state.get("_player")
+selected_player_id = st.session_state.get("_player")
 with st.container(border=True):
-    if pid is None or pid not in name_of:
+    if selected_player_id is None or selected_player_id not in name_of:
         st.caption("Click a dot to see that player here.")
     else:
         week = view.as_of
-        srow = res.status[res.status.player_id == pid]
-        h1, h2 = st.columns([3, 1])
-        h1.markdown(f"**{name_of[pid]}** · {pos_of[pid]} · week of {short_week(week)}")
-        with h2:
-            status_badge(status.get(pid, "gray"), float(srow.score.iloc[0]) if len(srow) else None)
-        pflags = res.player_flags(pid)
-        for f in pflags[:3]:
-            st.markdown(f"- {f.message}")
-        if not pflags:
+        player_status = detection.status[detection.status.player_id == selected_player_id]
+        name_column, badge_column = st.columns([3, 1])
+        name_column.markdown(f"**{name_of[selected_player_id]}** · {position_of[selected_player_id]} · "
+                             f"week of {short_week(week)}")
+        with badge_column:
+            status_badge(status_of.get(selected_player_id, "gray"),
+                         float(player_status.score.iloc[0]) if len(player_status) else None)
+        player_flags = detection.player_flags(selected_player_id)
+        for flag in player_flags[:3]:
+            st.markdown(f"- {flag.message}")
+        if not player_flags:
             st.caption("No flags in the current window.")
+
         default_skill = st.session_state.get("_skill", CFG.skills[0])
-        skill = st.selectbox("Skill", CFG.skills, index=CFG.skills.index(default_skill), format_func=label,
-                             key=f"panel_skill_{pid}")
+        skill = st.selectbox("Skill", CFG.skills, index=CFG.skills.index(default_skill), format_func=display_label,
+                             key=f"panel_skill_{selected_player_id}")
         st.session_state["_skill"] = skill
-        cr = coach[(coach.player_id == pid) & (coach.week_start == week) & (coach.skill == skill)]
-        rr = rep[(rep.player_id == pid) & (rep.week_start == week) & (rep.skill == skill)]
-        submitted = not rep[(rep.player_id == pid) & (rep.week_start == week)].empty
-        m = st.columns(4)
-        m[0].metric("Coach competency", f"{cr.competency.iloc[0]:.1f}" if len(cr) and pd.notna(cr.competency.iloc[0]) else "—")
-        m[1].metric("Coach effort", f"{cr.effort.iloc[0]:.1f}" if len(cr) and pd.notna(cr.effort.iloc[0]) else "—")
+        is_player = coach_ratings.player_id == selected_player_id
+        skill_rating = coach_ratings[is_player & (coach_ratings.week_start == week) & (coach_ratings.skill == skill)]
+        player_week_reports = reports[(reports.player_id == selected_player_id) & (reports.week_start == week)]
+        skill_report = player_week_reports[player_week_reports.skill == skill]
+        submitted = not player_week_reports.empty
+
+        competency_column, coach_effort_column, hours_column, self_effort_column = st.columns(4)
+        has_competency = len(skill_rating) and pd.notna(skill_rating.competency.iloc[0])
+        has_coach_effort = len(skill_rating) and pd.notna(skill_rating.effort.iloc[0])
+        competency_column.metric("Coach competency",
+                                 f"{skill_rating.competency.iloc[0]:.1f}" if has_competency else "—")
+        coach_effort_column.metric("Coach effort", f"{skill_rating.effort.iloc[0]:.1f}" if has_coach_effort else "—")
         if not submitted:
-            hrs, eff = "Missing", "—"
-        elif rr.hours.iloc[0] == 0:
-            hrs, eff = "Not trained", "—"
+            hours_text, effort_text = "Missing", "—"
+        elif skill_report.hours.iloc[0] == 0:
+            hours_text, effort_text = "Not trained", "—"
         else:
-            hrs, eff = f"{rr.hours.iloc[0]:.1f} h", f"{rr.effort.iloc[0]:.1f}"
-        m[2].metric("Self hours", hrs)
-        m[3].metric("Self effort", eff)
-        if submitted and not CFG.is_core(pos_of[pid], skill) and len(rr) and rr.hours.iloc[0] > 0:
+            hours_text, effort_text = f"{skill_report.hours.iloc[0]:.1f} h", f"{skill_report.effort.iloc[0]:.1f}"
+        hours_column.metric("Self hours", hours_text)
+        self_effort_column.metric("Self effort", effort_text)
+        is_off_profile = not CFG.is_core(position_of[selected_player_id], skill)
+        if submitted and is_off_profile and len(skill_report) and skill_report.hours.iloc[0] > 0:
             st.caption("Off-profile skill for this position — allowed, compared against core players, never penalised.")
-        tr = traits[(traits.player_id == pid) & (traits.week_start == week)]
-        if len(tr):
+
+        week_traits = traits[(traits.player_id == selected_player_id) & (traits.week_start == week)]
+        if len(week_traits):
             st.caption(":material/lock: Coach only")
-            t = st.columns(len(CFG.coach_traits))
-            for i, trait in enumerate(CFG.coach_traits):
-                v = tr[tr.trait == trait].score
-                t[i].metric(label(trait), f"{v.iloc[0]:.1f}" if len(v) else "—")
+            trait_columns = st.columns(len(CFG.coach_traits))
+            for trait_column, trait in zip(trait_columns, CFG.coach_traits):
+                trait_score = week_traits[week_traits.trait == trait].score
+                trait_column.metric(display_label(trait), f"{trait_score.iloc[0]:.1f}" if len(trait_score) else "—")
         st.page_link("views/player.py", label="Open full player page", icon=":material/arrow_forward:")
 
 # ---- other team views
 st.subheader("More team views")
-tab1, tab2, tab3 = st.tabs(["Heatmap", "Hours vs. improvement", "Effort gap"])
+heatmap_tab, hours_gain_tab, effort_gap_tab = st.tabs(["Heatmap", "Hours vs. improvement", "Effort gap"])
 
-with tab1:
+with heatmap_tab:
     if view.mode == "week":
-        hm = coach[coach.week_start == view.as_of].pivot_table(index="player_id", columns="skill", values="competency")
-        title = "Competency"
-        diverging = False
+        grid = (coach_ratings[coach_ratings.week_start == view.as_of]
+                .pivot_table(index="player_id", columns="skill", values="competency"))
+        colorbar_title, diverging = "Competency", False
     else:
-        cw = coach[coach.week_start.isin(view.weeks)].dropna(subset=["competency"]).sort_values("week_start")
-        first = cw.groupby(["player_id", "skill"]).competency.first()
-        last = cw.groupby(["player_id", "skill"]).competency.last()
-        hm = (last - first).unstack()
-        title, diverging = "Change", True
-    hm = hm.reindex(columns=[s for s in CFG.skills if s in hm.columns])
-    hm = hm[hm.index.isin(pl.player_id)]
-    hm.index = [name_of[i] for i in hm.index]
-    hm.columns = [label(s) for s in hm.columns]
-    if hm.empty:
+        rated_in_range = (coach_ratings[coach_ratings.week_start.isin(view.weeks)]
+                          .dropna(subset=["competency"]).sort_values("week_start"))
+        first_rating = rated_in_range.groupby(["player_id", "skill"]).competency.first()
+        last_rating = rated_in_range.groupby(["player_id", "skill"]).competency.last()
+        grid = (last_rating - first_rating).unstack()
+        colorbar_title, diverging = "Change", True
+    grid = grid.reindex(columns=[skill for skill in CFG.skills if skill in grid.columns])
+    grid = grid[grid.index.isin(shown_players.player_id)]
+    grid.index = [name_of[player_id] for player_id in grid.index]
+    grid.columns = [display_label(skill) for skill in grid.columns]
+    if grid.empty:
         st.caption("No coach ratings in this range.")
     else:
         st.caption("Competency this week." if view.mode == "week" else
                    "Change in competency from first to last rated week in the range (blue = improved).")
-        st.plotly_chart(charts.heatmap(hm.sort_index(), title, diverging), width="stretch")
+        st.plotly_chart(charts.heatmap(grid.sort_index(), colorbar_title, diverging), width="stretch")
 
-with tab2:
-    sk = st.selectbox("Skill", CFG.skills, key="hvg_skill", format_func=label)
-    s = res.skill_stats
-    s = s[(s.skill == sk) & s.hours_per_week.notna() & s.slope.notna() & s.player_id.isin(pl.player_id)].copy()
-    s["gain"] = (s["end"] - s["start"]).round(1)
-    s["name"] = s.player_id.map(name_of)
-    s["status"] = s.player_id.map(status).fillna("gray")
-    s["position"] = s.position.str.capitalize()
-    st.caption(f"Window {short_week(res.window[0])} – {short_week(res.window[-1])}. Each dot is a player; "
-               "the bottom-right corner (lots of hours, little improvement) is what the hours-vs-improvement rule looks for."
-               if res.window else "")
-    if s.empty:
+with hours_gain_tab:
+    scatter_skill = st.selectbox("Skill", CFG.skills, key="hvg_skill", format_func=display_label)
+    stats = detection.skill_stats
+    stats = stats[(stats.skill == scatter_skill) & stats.hours_per_week.notna() & stats.slope.notna()
+                  & stats.player_id.isin(shown_players.player_id)].copy()
+    stats["gain"] = (stats["end"] - stats["start"]).round(1)
+    stats["name"] = stats.player_id.map(name_of)
+    stats["status"] = stats.player_id.map(status_of).fillna("gray")
+    stats["position"] = stats.position.str.capitalize()
+    st.caption(f"Window {short_week(detection.window[0])} – {short_week(detection.window[-1])}. Each dot is a player; "
+               "the bottom-right corner (lots of hours, little improvement) is what the hours-vs-improvement rule "
+               "looks for." if detection.window else "")
+    if stats.empty:
         st.caption("Not enough data for this skill yet.")
     else:
-        ev = st.plotly_chart(charts.hours_gain_scatter(s, label(sk)), width="stretch",
-                             on_select="rerun", selection_mode="points", key="hvg")
-        if ev and ev.selection and ev.selection.get("points"):
-            pt = next((p for p in ev.selection["points"] if p.get("customdata")), None)
-            if pt:
-                select_player(int(float(pt["customdata"][0])))
-                st.session_state["_skill"] = sk
+        scatter_event = st.plotly_chart(charts.hours_gain_scatter(stats, display_label(scatter_skill)),
+                                        width="stretch", on_select="rerun", selection_mode="points", key="hvg")
+        if scatter_event and scatter_event.selection and scatter_event.selection.get("points"):
+            clicked_point = next((point for point in scatter_event.selection["points"] if point.get("customdata")),
+                                 None)
+            if clicked_point:
+                select_player(int(float(clicked_point["customdata"][0])))
+                st.session_state["_skill"] = scatter_skill
 
-with tab3:
-    w = res.window
-    r = rep[rep.week_start.isin(w) & (rep.hours > 0)].dropna(subset=["effort"])
-    c = coach[coach.week_start.isin(w)].dropna(subset=["effort"])
-    m = r.merge(c[["player_id", "week_start", "skill", "effort"]], on=["player_id", "week_start", "skill"],
-                suffixes=("_self", "_coach"))
-    g = m.groupby("player_id").agg(self_effort=("effort_self", "mean"), coach_effort=("effort_coach", "mean")).reset_index()
-    g = g[g.player_id.isin(pl.player_id)]
-    if g.empty:
+with effort_gap_tab:
+    window = detection.window
+    self_effort = reports[reports.week_start.isin(window) & (reports.hours > 0)].dropna(subset=["effort"])
+    coach_effort = coach_ratings[coach_ratings.week_start.isin(window)].dropna(subset=["effort"])
+    paired = self_effort.merge(coach_effort[["player_id", "week_start", "skill", "effort"]],
+                               on=["player_id", "week_start", "skill"], suffixes=("_self", "_coach"))
+    effort_by_player = (paired.groupby("player_id")
+                        .agg(self_effort=("effort_self", "mean"), coach_effort=("effort_coach", "mean"))
+                        .reset_index())
+    effort_by_player = effort_by_player[effort_by_player.player_id.isin(shown_players.player_id)]
+    if effort_by_player.empty:
         st.caption("No matching self/coach effort ratings in the window.")
     else:
-        g["gap"] = (g.self_effort - g.coach_effort).round(1)
-        g["name"] = g.player_id.map(name_of)
-        g["status"] = g.player_id.map(status).fillna("gray")
+        effort_by_player["gap"] = (effort_by_player.self_effort - effort_by_player.coach_effort).round(1)
+        effort_by_player["name"] = effort_by_player.player_id.map(name_of)
+        effort_by_player["status"] = effort_by_player.player_id.map(status_of).fillna("gray")
         st.caption("Average effort per player over the detection window, only where both the player and a coach rated "
                    f"the same skill and week. Most players rate themselves a bit higher — the team's median gap is "
-                   f"{g.gap.median():+.1f}.")
-        st.plotly_chart(charts.effort_dumbbell(g), width="stretch")
+                   f"{effort_by_player.gap.median():+.1f}.")
+        st.plotly_chart(charts.effort_dumbbell(effort_by_player), width="stretch")

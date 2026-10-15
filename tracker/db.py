@@ -1,10 +1,16 @@
-"""SQLite schema and connection.
+"""
+SQLite schema and connection.
 
 Traceability rules baked into the schema:
 - Every training row points to its submission, which points to the exact imported file (sha256 + stored copy).
 - Nothing is overwritten: resubmissions and corrected coach ratings insert new rows and mark the old
   one with `superseded_by`.
 - Scores are stored as integer tenths (7.5 -> 75) so the 1.0-10.0 scale is enforced by the database.
+
+Version history
+---------------
+1.0.0  2026-10-13  Initial release.
+1.1.0  2026-10-15  Readability pass: descriptive names, file header.
 """
 from __future__ import annotations
 
@@ -97,11 +103,12 @@ CREATE INDEX IF NOT EXISTS idx_ct_week ON coach_traits(week_start, player_id);
 
 
 def connect(path: str | Path | None = None, check_same_thread: bool = True) -> sqlite3.Connection:
-    path = Path(path or CFG.db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    for d in (CFG.inbox, CFG.archive, CFG.rejected):
-        d.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=check_same_thread)
+    """Open the database (creating it and the data folders if needed) and apply the schema."""
+    db_path = Path(path or CFG.db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    for folder in (CFG.inbox_dir, CFG.archive_dir, CFG.rejected_dir):
+        folder.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path, check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
@@ -113,12 +120,13 @@ def now_iso() -> str:
 
 
 def to_tenths(value) -> int | None:
+    """7.5 -> 75. Blank, non-numeric and NaN values become None."""
     if value is None:
         return None
     try:
-        f = float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return None
-    if math.isnan(f):
+    if math.isnan(number):
         return None
-    return int(round(f * 10))
+    return int(round(number * 10))

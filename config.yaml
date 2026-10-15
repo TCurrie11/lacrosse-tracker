@@ -1,5 +1,9 @@
 # Lacrosse Tracker configuration
 # Changing a list here changes the app — no code edits needed.
+#
+# Version history
+# 1.0.0  2026-10-13  Initial release.
+# 1.1.0  2026-10-15  Added this header. No setting changed.
 
 # Skills shared by player reports AND coach ratings. Names must match exactly.
 skills:

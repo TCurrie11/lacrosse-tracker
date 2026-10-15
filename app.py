@@ -1,4 +1,13 @@
-"""Lacrosse Tracker — run with:  streamlit run app.py"""
+"""
+Lacrosse Tracker: Streamlit entry point and page list.
+
+Run with:  streamlit run app.py
+
+Version history
+---------------
+1.0.0  2026-10-13  Initial release.
+1.1.0  2026-10-15  Readability pass: file header.
+"""
 import streamlit as st
 
 st.set_page_config(page_title="Lacrosse Tracker", page_icon=":material/sports:", layout="wide")

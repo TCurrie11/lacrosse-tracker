@@ -1,12 +1,19 @@
-"""Read-side queries. Everything the app shows comes through here as DataFrames."""
+"""
+Read-side queries. Everything the app shows comes through here as DataFrames.
+
+Scores are stored as integer tenths and converted back to the 1.0-10.0 scale here.
+
+Version history
+---------------
+1.0.0  2026-10-13  Initial release.
+1.1.0  2026-10-15  Readability pass: descriptive names, file header.
+"""
 from __future__ import annotations
 
 import sqlite3
 from datetime import date, timedelta
 
 import pandas as pd
-
-from .config import CFG
 
 
 def players_df(conn: sqlite3.Connection, active_only: bool = True) -> pd.DataFrame:
@@ -17,14 +24,15 @@ def players_df(conn: sqlite3.Connection, active_only: bool = True) -> pd.DataFra
 
 
 def weeks_available(conn: sqlite3.Connection) -> list[str]:
+    """Every week (Monday, ISO date) that has a player report or a coach rating, oldest first."""
     rows = conn.execute(
         "SELECT week_start FROM submissions UNION SELECT week_start FROM coach_ratings"
         " UNION SELECT week_start FROM coach_traits ORDER BY 1").fetchall()
-    return [r[0] for r in rows]
+    return [row[0] for row in rows]
 
 
-def monday(d: date) -> date:
-    return d - timedelta(days=d.weekday())
+def monday(day: date) -> date:
+    return day - timedelta(days=day.weekday())
 
 
 def reports_df(conn: sqlite3.Connection, include_superseded: bool = False) -> pd.DataFrame:
@@ -44,7 +52,7 @@ def reports_df(conn: sqlite3.Connection, include_superseded: bool = False) -> pd
 
 def coach_skill_df(conn: sqlite3.Connection) -> pd.DataFrame:
     """Weekly coach score per player / skill = average across coaches."""
-    df = pd.read_sql("""
+    ratings = pd.read_sql("""
         SELECT week_start, player_id, skill,
                AVG(competency) / 10.0 AS competency, AVG(effort) / 10.0 AS effort,
                COUNT(competency) AS n_coaches, GROUP_CONCAT(DISTINCT coach) AS coaches
@@ -52,19 +60,20 @@ def coach_skill_df(conn: sqlite3.Connection) -> pd.DataFrame:
         GROUP BY week_start, player_id, skill
         HAVING COUNT(competency) > 0 OR COUNT(effort) > 0
     """, conn)
-    for c in ("competency", "effort"):
-        df[c] = df[c].round(1)
-    return df
+    for column in ("competency", "effort"):
+        ratings[column] = ratings[column].round(1)
+    return ratings
 
 
 def coach_traits_df(conn: sqlite3.Connection) -> pd.DataFrame:
-    df = pd.read_sql("""
+    """Weekly coach-only trait score per player / trait = average across coaches."""
+    traits = pd.read_sql("""
         SELECT week_start, player_id, trait, AVG(score) / 10.0 AS score, COUNT(score) AS n_coaches
         FROM coach_traits WHERE superseded_by IS NULL
         GROUP BY week_start, player_id, trait HAVING COUNT(score) > 0
     """, conn)
-    df["score"] = df["score"].round(1)
-    return df
+    traits["score"] = traits["score"].round(1)
+    return traits
 
 
 def submissions_df(conn: sqlite3.Connection) -> pd.DataFrame:
@@ -85,11 +94,12 @@ def ingest_log_df(conn: sqlite3.Connection) -> pd.DataFrame:
 
 
 def missing_reports(conn: sqlite3.Connection, weeks: list[str]) -> pd.DataFrame:
+    """Active players with no submission for each of `weeks`."""
     players = players_df(conn)
-    subs = submissions_df(conn)
-    have = set(zip(subs.player_id, subs.week_start))
-    rows = [(p.player_id, p.name, w) for w in weeks for p in players.itertuples()
-            if (p.player_id, w) not in have]
+    submissions = submissions_df(conn)
+    submitted = set(zip(submissions.player_id, submissions.week_start))
+    rows = [(player.player_id, player.name, week) for week in weeks for player in players.itertuples()
+            if (player.player_id, week) not in submitted]
     return pd.DataFrame(rows, columns=["player_id", "name", "week_start"])
 
 
